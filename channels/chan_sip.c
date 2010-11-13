@@ -547,6 +547,9 @@ static int mwi_expiry = DEFAULT_MWI_EXPIRY;
 
 #define INITIAL_CSEQ                 101              /*!< Our initial sip sequence number */
 
+/* RT-200NE HACK */
+#define MAX_RT200NE		     4		     /* Number of RT-200NEs */
+
 #define DEFAULT_MAX_SE               1800             /*!< Session-Timer Default Session-Expires period (RFC 4028) */
 #define DEFAULT_MIN_SE               90               /*!< Session-Timer Default Min-SE period (RFC 4028) */
 
@@ -1121,6 +1124,10 @@ static int global_dynamic_exclude_static = 0;	/*!< Exclude static peers from con
 
 /*! \brief Global list of addresses dynamic peers are not allowed to use */
 static struct ast_ha *global_contact_ha = NULL;
+
+/* RT-200NE HACK */
+static char global_rt200ne[MAX_RT200NE][20];
+static int  global_rt200ne_cnt = 0;
 
 /*! \name Object counters @{
  * \bug These counters are not handled in a thread-safe way ast_atomic_fetchadd_int()
@@ -2448,6 +2455,7 @@ static char *sip_qualify_peer(struct ast_cli_entry *e, int cmd, struct ast_cli_a
 static char *sip_show_registry(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a);
 static char *sip_unregister(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a);
 static char *sip_show_settings(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a);
+static char *sip_show_rt200ne(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a);
 static char *sip_show_mwi(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a);
 static const char *subscription_type2str(enum subscriptiontype subtype) attribute_pure;
 static const struct cfsubscription_types *find_subscription_type(enum subscriptiontype subtype);
@@ -16303,6 +16311,36 @@ static char *sip_show_mwi(struct ast_cli_entry *e, int cmd, struct ast_cli_args 
 }
 
 
+/*! \brief Show registered RT-200NEs */
+static char *sip_show_rt200ne(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
+{
+      int     tmp_i;
+
+	switch (cmd) {
+        case CLI_INIT:
+                e->command = "sip show rt200ne";
+                e->usage =
+                        "Usage: sip show rt200ne\n"
+                        "       List RT-200NE(s) settings.\n";
+                return NULL;
+        case CLI_GENERATE:
+                return NULL;
+        }
+
+      if (a->argc != 3)
+              return CLI_SHOWUSAGE;
+      if (global_rt200ne_cnt == 0){
+              ast_cli(a->fd,"No RT-200NE(s)\n");
+      } else {
+              ast_cli(a->fd,"RT-200NE at ..\n");
+              for (tmp_i=0;tmp_i<global_rt200ne_cnt;tmp_i++){
+                      ast_cli(a->fd, "- %-16.16s\n", global_rt200ne[tmp_i]);
+              }
+      }
+
+      return CLI_SUCCESS;
+}
+
 /*! \brief Show subscription type in string format */
 static const char *subscription_type2str(enum subscriptiontype subtype)
 {
@@ -17282,12 +17320,39 @@ static int build_reply_digest(struct sip_pvt *p, int method, char* digest, int d
 	const char *md5secret;
 	struct sip_auth *auth = NULL;	/* Realm authentication */
 
+	/* RT-200NE HACK */
+	char tmp_addr[20];
+	char tmp_uri[256];
+	int tmp_i;
+
 	if (!ast_strlen_zero(p->domain))
 		ast_copy_string(uri, p->domain, sizeof(uri));
 	else if (!ast_strlen_zero(p->uri))
 		ast_copy_string(uri, p->uri, sizeof(uri));
 	else
 		snprintf(uri, sizeof(uri), "sip:%s@%s", p->username, ast_inet_ntoa(p->sa.sin_addr));
+
+	/* RT-200NE HACK */
+	strcpy(tmp_addr, ast_inet_ntoa(p->sa.sin_addr));
+	/* ast_verbose(VERBOSE_PREFIX_3 "inet is  %s \n", tmp_addr); */
+	for (tmp_i=0;tmp_i<global_rt200ne_cnt;tmp_i++){
+		if(strcmp(tmp_addr, global_rt200ne[tmp_i]) == 0){
+			/* ast_verbose(VERBOSE_PREFIX_3 "Peer is RT-200NE\n"); */
+			if (strcmp(uri, "domain") == 0) {
+				strncpy(tmp_uri, p->uri, sizeof(tmp_uri));
+				switch (method) {
+				case    SIP_REGISTER:
+					sprintf(uri, "sip:%s",tmp_addr);
+					break;
+				default:
+					*strchr(tmp_uri, '@') = '\0';
+					snprintf(uri, sizeof(uri), "%s@%s",tmp_uri,tmp_addr);
+					break;
+				}
+			}
+		}
+	}
+	/* RT-200NE HACK END */
 
 	snprintf(cnonce, sizeof(cnonce), "%08lx", ast_random());
 
@@ -24747,6 +24812,10 @@ static int reload_config(enum channelreloadreason reason)
 
 	sip_cfg.matchexterniplocally = DEFAULT_MATCHEXTERNIPLOCALLY;
 
+	/* RT-200NE HACK */
+	memset(global_rt200ne, 0, sizeof(global_rt200ne));
+	global_rt200ne_cnt = 0;
+
 	/* Copy the default jb config over global_jbconf */
 	memcpy(&global_jbconf, &default_jbconf, sizeof(struct ast_jb_conf));
 
@@ -25131,6 +25200,11 @@ static int reload_config(enum channelreloadreason reason)
 				default_maxcallbitrate = DEFAULT_MAX_CALL_BITRATE;
 		} else if (!strcasecmp(v->name, "matchexterniplocally")) {
 			sip_cfg.matchexterniplocally = ast_true(v->value);
+		} else if (!strcasecmp(v->name, "rt200ne")) { /*RT-200NE HACK*/
+			if (global_rt200ne_cnt < MAX_RT200NE) {
+				ast_copy_string(global_rt200ne[global_rt200ne_cnt], v->value, sizeof(global_rt200ne));
+				global_rt200ne_cnt++;
+			}
 		} else if (!strcasecmp(v->name, "session-timers")) {
 			int i = (int) str2stmode(v->value); 
 			if (i < 0) {
@@ -25968,6 +26042,7 @@ static struct ast_cli_entry cli_sip[] = {
 	AST_CLI_DEFINE(sip_show_registry, "List SIP registration status"),
 	AST_CLI_DEFINE(sip_unregister, "Unregister (force expiration) a SIP peer from the registry"),
 	AST_CLI_DEFINE(sip_show_settings, "Show SIP global settings"),
+	AST_CLI_DEFINE(sip_show_rt200ne, "Show RT-200NE settings"),
 	AST_CLI_DEFINE(sip_show_mwi, "Show MWI subscriptions"),
 	AST_CLI_DEFINE(sip_cli_notify, "Send a notify packet to a SIP peer"),
 	AST_CLI_DEFINE(sip_show_channel, "Show detailed SIP channel info"),
